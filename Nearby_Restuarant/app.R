@@ -6,6 +6,7 @@ library(dplyr)
 library(usa)
 library(tidyverse)
 library(stringr)
+library(ggplot2)
 
 readRenviron(".Renviron")
 YELP_API=Sys.getenv("YELP_API")
@@ -28,6 +29,39 @@ get_name <- function(loc, sortinfo) {
     }
     
     
+    return(info)
+}
+
+get_price <- function(loc,sortinfo){
+    `%!in%` = Negate(`%in%`)
+    if (!is.null(loc) && (loc %in% city.name | loc %in% zip.code)) {
+        r <- GET(
+            "https://api.yelp.com/v3/businesses/search",
+            add_headers(Authorization = paste("Bearer", YELP_API)),
+            query = list(
+                location = loc,
+                sort_by = sortinfo
+            )
+        )
+        stop_for_status(r)
+        json <- content(r, as = "text")
+        info <- (fromJSON(json, flatten = TRUE)$businesses %>% select(price))
+        info$pricelevel<-nchar(info$price)
+        level<-info%>%group_by(pricelevel)%>%count()
+        for (i in 1:4){
+            if (i %!in% level$pricelevel){
+                pricelevel=c(level$pricelevel,i)
+                n = c(level$n,0)
+                level <- data.frame("pricelevel"=pricelevel,"n"=n)
+                level<-level%>%arrange(pricelevel)
+            }
+        }
+        level$pricelevel=c("Low Price","Median-Low Price","Median-High Price","High Price")
+        
+        info<-level
+    } else {
+        info <- NULL
+    }
     return(info)
 }
 
@@ -129,7 +163,7 @@ get_photo <- function(id) {
     json <- content(r, as = "text")
     photo <- fromJSON(json, flatten = TRUE)$photos
     photo <- data.frame(photo)
-    colnames(photo) <- c("Photo link")
+    colnames(photo) <- c("photos")
     return(photo)
 }
 
@@ -155,7 +189,18 @@ get_review <- function(id) {
     )
     stop_for_status(r)
     json <- content(r, as = "text")
-    fromJSON(json, flatten = TRUE)$reviews %>% select(text, rating)
+    fromJSON(json, flatten = TRUE)$reviews %>% select(time_created,text,rating)
+}
+
+get_rating <- function(id) {
+    r <- GET(
+        str_glue("https://api.yelp.com/v3/businesses/{id}", id = id),
+        add_headers(Authorization = paste("Bearer", YELP_API)),
+        query = list()
+    )
+    stop_for_status(r)
+    json <- content(r, as = "text")
+    fromJSON(json, flatten = TRUE)$rating
 }
 
 ui <- fluidPage(
@@ -174,7 +219,8 @@ ui <- fluidPage(
                 tabPanel(
                     "Nearby Restaurant Name",
                     column(tableOutput("restaurant_name"), width = 5),
-                    column(plotOutput("reviewcount"), width = 7)
+                    column(plotOutput("reviewcount"), plotOutput("price"),width = 7),
+                    
                 ),
                 tabPanel(
                     "Restaurant Info",
@@ -188,7 +234,9 @@ ui <- fluidPage(
                 tabPanel(
                     "Restaurant Review",
                     textOutput("reviewtitle"),
-                    tableOutput("review")
+                    tableOutput("review"),
+                    textOutput("ratingtitle"),
+                    plotOutput("rating")
                 )
             ),
             width = 9
@@ -236,10 +284,22 @@ server <- function(input, output, session) {
         req(!is.null(input$location))
         req(str_to_title(input$location) %in% city.name | input$location %in% zip.code)
         barplot(get_count(str_to_title(input$location), input$sort),
-                xlab = "Restuarant listed on the left accordingly",
+                col=rgb(0.8,0.1,0.1,0.6),
+                xlab = "Restaurant listed on the left accordingly",
                 ylab = "Review Count",
-                main = "Review Count of Restuarants shown on the left"
+                main = "Review Count of Restaurant shown on the left"
         )
+    })
+    output$price <- renderPlot({
+        req(!is.null(input$location))
+        req(str_to_title(input$location) %in% city.name | input$location %in% zip.code)
+        pricelevel=get_price(str_to_title(input$location), input$sort)%>%select(pricelevel)
+        ggplot(get_price(str_to_title(input$location), input$sort),aes(x="",y=n,fill=pricelevel))+
+            geom_bar(width = 1, stat = "identity") +
+            coord_polar("y", start=0) +
+            ggtitle("Pir chart for Price Level of Restaurant shown on the left")+
+            ylab("Number of Restaurant")+
+            theme(plot.title = element_text(face="bold",hjust = 0.8))
     })
     output$infotitle <- renderText({
         res <- input$restaurant
@@ -292,6 +352,21 @@ server <- function(input, output, session) {
         req(res != "-")
         get_review(get_id(str_to_title(input$location), input$sort, res))
     })
+    output$ratingtitle <- renderText({
+        res <- input$restaurant
+        if (res != "-") {
+            paste0("Ratings for ", res)
+        }
+    })
+    output$rating <- renderPlot({
+        res <- input$restaurant
+        req(res != "-")
+        t=get_review(get_id(str_to_title(input$location), input$sort, res))
+        plot.ts(t$rating,ylim=c(1,5),ylab="Ratings",col="blue")
+        abline(h=get_rating(get_id(str_to_title(input$location), input$sort, res)),col="red",lty=2)
+        legend("right",c("Recent Rating for the restaurant","Avergae Rating for the restaurant"),lty=c(1,2),col=c("blue","red"))
+    })
+    
 }
 
 shinyApp(ui, server)
